@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/valyala/fastjson"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -60,7 +61,7 @@ func newWithWriter(retryWriter, deadWriter io.WriteCloser) *Logger {
 	}
 }
 
-func New(filename string, otps ...Option) (*Logger, error) {
+func New(filename string, opts ...Option) (*Logger, error) {
 	lj := &lumberjack.Logger{
 		Filename:   filename,
 		MaxSize:    100,
@@ -78,9 +79,9 @@ func New(filename string, otps ...Option) (*Logger, error) {
 		Compress:   true,
 	}
 
-	for _, applyOtp := range otps {
-		applyOtp(lj)
-		applyOtp(lj2)
+	for _, applyOpt := range opts {
+		applyOpt(lj)
+		applyOpt(lj2)
 	}
 
 	dir := filepath.Dir(filename)
@@ -167,22 +168,51 @@ func (l *Logger) Close() error {
 	}
 
 	if len(errs) > 0 {
-		return errs[0]
+		return errors.Join(errs...)
 	}
 	return nil
 }
 
+const hexChars = "0123456789abcdef"
+
 func appendEscapedJSON(buf []byte, s string) []byte {
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c >= 0x80 {
+			// Non-ASCII: validate and pass through the full UTF-8 sequence.
+			// utf8.DecodeRuneInString returns RuneError+size=1 for invalid bytes.
+			r, size := utf8.DecodeRuneInString(s[i:])
+			if r == utf8.RuneError && size == 1 {
+				buf = append(buf, `\ufffd`...)
+			} else {
+				buf = append(buf, s[i:i+size]...)
+			}
+			i += size
+			continue
+		}
+		i++
+		switch c {
 		case '"':
 			buf = append(buf, `\"`...)
 		case '\\':
 			buf = append(buf, `\\`...)
 		case '\n':
 			buf = append(buf, `\n`...)
+		case '\r':
+			buf = append(buf, `\r`...)
+		case '\t':
+			buf = append(buf, `\t`...)
+		case '\b':
+			buf = append(buf, `\b`...)
+		case '\f':
+			buf = append(buf, `\f`...)
 		default:
-			buf = append(buf, s[i])
+			if c < 0x20 {
+				// Remaining control characters: \u00XX
+				buf = append(buf, '\\', 'u', '0', '0', hexChars[c>>4], hexChars[c&0xf])
+			} else {
+				buf = append(buf, c)
+			}
 		}
 	}
 	return buf

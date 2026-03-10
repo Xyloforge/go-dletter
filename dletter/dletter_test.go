@@ -10,6 +10,12 @@ import (
 	"testing"
 )
 
+// errWriter is a no-op writer whose Close returns a configurable error.
+type errWriter struct{ err error }
+
+func (e *errWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (e *errWriter) Close() error                { return e.err }
+
 // Dummy struct that implements Loggable for the test
 type ReservationDeadletter struct {
 	Type string
@@ -55,6 +61,12 @@ func TestAppendEscapedJSON(t *testing.T) {
 		{`foo\bar`, `foo\\bar`},
 		{"line1\nline2", `line1\nline2`},
 		{"normal string", "normal string"},
+		{"tab\there", `tab\there`},
+		{"cr\rhere", `cr\rhere`},
+		{"\bbackspace\f", `\bbackspace\f`},
+		{"\x01\x02\x1f", `\u0001\u0002\u001f`},
+		{"valid utf8 \u4e16\u754c", "valid utf8 \u4e16\u754c"},
+		{"invalid utf8 \x80\xff", `invalid utf8 \ufffd\ufffd`},
 	}
 
 	for _, tt := range tests {
@@ -146,5 +158,62 @@ func TestLogger_ConcurrencyAndRace(t *testing.T) {
 
 	if lineCount != goroutines {
 		t.Errorf("Expected %d lines in log, but found %d. We dropped data!", goroutines, lineCount)
+	}
+}
+
+func TestLogPermanent_ConcurrentRace(t *testing.T) {
+	tmpDir := t.TempDir()
+	l, err := New(filepath.Join(tmpDir, "test_perm.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	const goroutines = 500
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			payload := ReservationDeadletter{Type: "perm", Qty: id}
+			var buf []byte
+			buf = payload.AppendLog(buf)
+			if err := l.LogPermanent(buf, "max attempts exceeded"); err != nil {
+				t.Errorf("goroutine %d: %v", id, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	f, err := os.Open(filepath.Join(tmpDir, "permanent-test_perm.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	count := 0
+	for scanner.Scan() {
+		count++
+	}
+	if count != goroutines {
+		t.Errorf("expected %d lines in permanent log, got %d", goroutines, count)
+	}
+}
+
+func TestClose_BothErrors(t *testing.T) {
+	err1 := errors.New("retry writer close error")
+	err2 := errors.New("dead writer close error")
+	l := newWithWriter(&errWriter{err1}, &errWriter{err2})
+
+	err := l.Close()
+	if err == nil {
+		t.Fatal("expected error from Close, got nil")
+	}
+	if !errors.Is(err, err1) {
+		t.Errorf("expected err1 (%v) in joined error: %v", err1, err)
+	}
+	if !errors.Is(err, err2) {
+		t.Errorf("expected err2 (%v) in joined error: %v", err2, err)
 	}
 }

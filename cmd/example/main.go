@@ -2,14 +2,13 @@ package main
 
 import (
 	"context"
+	"github.com/Xyloforge/go-dletter/dletter"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"strconv"
 	"time"
-
-	"go-recovery/dletter"
 )
 
 type ReservationDeadletter struct {
