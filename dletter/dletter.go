@@ -1,6 +1,7 @@
 package dletter
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +16,9 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-// Logger handles writing failed items to a recovery file
+// Logger manages two on-disk JSONL log files: a retry log for items that can
+// still be retried, and a permanent-failure log for items that have exhausted
+// their retry budget. Create one with [New].
 type Logger struct {
 	filename    string
 	retryMu     sync.Mutex
@@ -26,6 +29,8 @@ type Logger struct {
 	parserPool  fastjson.ParserPool
 }
 
+// Envelope is the JSON structure written to disk for each failed item.
+// It wraps the original payload with metadata (timestamp, attempt count, error reason).
 type Envelope struct {
 	Timestamp int64      `json:"ts"`
 	Reason    string     `json:"reason"`
@@ -33,6 +38,8 @@ type Envelope struct {
 	Payload   RawPayload `json:"payload"`
 }
 
+// RawPayload is a raw JSON byte slice that implements [Loggable].
+// It is used internally during replay to re-log payloads that still fail.
 type RawPayload []byte
 
 func (r RawPayload) AppendLog(buf []byte) []byte {
@@ -44,6 +51,10 @@ func (r *RawPayload) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Loggable is an optional interface for zero-allocation payload serialization.
+// If a type passed to [Log] implements Loggable, its AppendLog method is used
+// instead of [json.Marshal]. This is only necessary for high-throughput
+// scenarios where GC pressure from json.Marshal is measurable.
 type Loggable interface {
 	AppendLog(buf []byte) []byte
 }
@@ -61,6 +72,10 @@ func newWithWriter(retryWriter, deadWriter io.WriteCloser) *Logger {
 	}
 }
 
+// New creates a [Logger] that writes to filename (retry log) and
+// "permanent-<basename>" (permanent-failure log) in the same directory.
+// The directory is created if it does not exist. Use functional [Option]
+// values to configure log rotation (size, backups, age, compression).
 func New(filename string, opts ...Option) (*Logger, error) {
 	lj := &lumberjack.Logger{
 		Filename:   filename,
@@ -94,7 +109,12 @@ func New(filename string, opts ...Option) (*Logger, error) {
 	return l, nil
 }
 
-func Log[T Loggable](l *Logger, data T, reason error, attempt int) error {
+// Log writes a failed item to the retry log as a single JSON line.
+// data can be any value: if it implements [Loggable], the zero-allocation
+// AppendLog path is used; otherwise it is serialized with [json.Marshal].
+// reason is the error that caused the failure, and attempt is the current
+// retry count (starting at 1). Log is safe for concurrent use.
+func Log[T any](l *Logger, data T, reason error, attempt int) error {
 	if l == nil {
 		return errors.New("logger is nil")
 	}
@@ -112,7 +132,17 @@ func Log[T Loggable](l *Logger, data T, reason error, attempt int) error {
 	buf = append(buf, '"')
 
 	buf = append(buf, []byte(`,"payload":`)...)
-	buf = data.AppendLog(buf)
+	if loggable, ok := any(data).(Loggable); ok {
+		buf = loggable.AppendLog(buf)
+	} else {
+		b, err := json.Marshal(data)
+		if err != nil {
+			*pBuf = buf[:0]
+			l.pool.Put(pBuf)
+			return fmt.Errorf("dletter: marshal payload: %w", err)
+		}
+		buf = append(buf, b...)
+	}
 	buf = append(buf, []byte("}\n")...)
 
 	l.retryMu.Lock()
@@ -124,6 +154,9 @@ func Log[T Loggable](l *Logger, data T, reason error, attempt int) error {
 	return err
 }
 
+// LogPermanent writes a raw JSON payload directly to the permanent-failure log.
+// Use this when you want to route items to permanent failure outside of the
+// automatic retry flow. Safe for concurrent use.
 func (l *Logger) LogPermanent(data []byte, reason string) error {
 	if l == nil {
 		return errors.New("logger is nil")
@@ -152,7 +185,8 @@ func (l *Logger) LogPermanent(data []byte, reason string) error {
 	return err
 }
 
-// Close closes the file handle
+// Close flushes and closes both the retry and permanent-failure log file
+// handles. Always call this (e.g. via defer) to avoid data loss.
 func (l *Logger) Close() error {
 	l.retryMu.Lock()
 	defer l.retryMu.Unlock()
@@ -218,6 +252,8 @@ func appendEscapedJSON(buf []byte, s string) []byte {
 	return buf
 }
 
+// Rotate manually triggers rotation of the active retry log. This is called
+// automatically by [Logger.Replay] before processing backup files.
 func (l *Logger) Rotate() error {
 	l.retryMu.Lock()
 	defer l.retryMu.Unlock()

@@ -2,36 +2,26 @@ package main
 
 import (
 	"context"
-	"github.com/Xyloforge/go-dletter/dletter"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
-	"strconv"
 	"time"
+
+	"github.com/Xyloforge/go-dletter/dletter"
 )
 
-type ReservationDeadletter struct {
-	Type string `json:"type"`
-	SpID string `json:"sp_id"`
-	Qty  int    `json:"qty"`
-}
-
-func (r ReservationDeadletter) AppendLog(buf []byte) []byte {
-	buf = append(buf, `{"type":"`...)
-	buf = append(buf, r.Type...)
-	buf = append(buf, `","sp_id":"`...)
-	buf = append(buf, r.SpID...)
-	buf = append(buf, `","qty":`...)
-	buf = strconv.AppendInt(buf, int64(r.Qty), 10)
-	buf = append(buf, `}`...)
-	return buf
+// Order is a plain struct with json tags — no Loggable interface needed.
+// dletter.Log serializes it automatically via json.Marshal.
+type Order struct {
+	ID  string `json:"id"`
+	Qty int    `json:"qty"`
 }
 
 func main() {
-	fmt.Println("=== Starting R-DLQ System ===")
+	fmt.Println("=== Starting DLQ System ===")
 
-	dlq, err := dletter.New("logs/dead_reservations.log",
+	dlq, err := dletter.New("logs/orders.log",
 		dletter.WithMaxSize(10),
 		dletter.WithCompress(true),
 	)
@@ -40,13 +30,12 @@ func main() {
 	}
 	defer dlq.Close()
 
-	fmt.Println("[Main App] Attempting to reserve inventory...")
-	failedRes := ReservationDeadletter{Type: "reserve", SpID: "PROD-99", Qty: 5}
+	fmt.Println("[Main App] Attempting to save order...")
+	order := Order{ID: "ord-42", Qty: 5}
 	dbErr := errors.New("database timeout: connection refused")
 
 	fmt.Println("[Main App] Database failed! Routing to DLQ...")
-	err = dletter.Log(dlq, failedRes, dbErr, 1)
-	if err != nil {
+	if err := dletter.Log(dlq, order, dbErr, 1); err != nil {
 		log.Fatalf("Critical: Failed to write to DLQ: %v", err)
 	}
 
@@ -54,15 +43,13 @@ func main() {
 	fmt.Println("\n=== Waking up Background Recovery Worker ===")
 
 	recoveryHandler := func(payload []byte) error {
-		var res ReservationDeadletter
-
-		if err := json.Unmarshal(payload, &res); err != nil {
+		var o Order
+		if err := json.Unmarshal(payload, &o); err != nil {
 			return fmt.Errorf("corrupted payload: %w", err)
 		}
 
-		fmt.Printf("[Worker] Successfully parsed payload! Type: %s, SpID: %s, Qty: %d\n", res.Type, res.SpID, res.Qty)
+		fmt.Printf("[Worker] Recovered order: ID=%s, Qty=%d\n", o.ID, o.Qty)
 		fmt.Println("[Worker] Re-attempting database save... SUCCESS!")
-
 		return nil
 	}
 

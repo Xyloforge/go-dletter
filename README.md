@@ -36,25 +36,13 @@ import (
     "github.com/Xyloforge/go-dletter/dletter"
 )
 
-// 1. Define your payload type and implement dletter.Loggable.
-//    AppendLog must serialise the value into buf without heap allocations.
 type Order struct {
     ID  string `json:"id"`
     Qty int    `json:"qty"`
 }
 
-func (o Order) AppendLog(buf []byte) []byte {
-    buf = append(buf, `{"id":"`...)
-    buf = append(buf, o.ID...)
-    buf = append(buf, `","qty":`...)
-    buf = strconv.AppendInt(buf, int64(o.Qty), 10)
-    buf = append(buf, '}')
-    return buf
-}
-
 func main() {
-    // 2. Create a logger. Both the retry log and the permanent-failure log
-    //    are created automatically under the same directory.
+    // 1. Create a logger.
     dlq, err := dletter.New("logs/orders.log",
         dletter.WithMaxSize(50),     // rotate at 50 MB
         dletter.WithMaxBackups(10),  // keep 10 rotated files
@@ -66,14 +54,13 @@ func main() {
     }
     defer dlq.Close()
 
-    // 3. Record a failure (e.g. inside your business logic when an op fails).
-    if err := saveOrder(order); err != nil {
-        if logErr := dletter.Log(dlq, order, err, attemptNumber); logErr != nil {
-            log.Printf("CRITICAL: DLQ write failed: %v", logErr)
-        }
+    // 2. Record a failure — any struct with json tags works.
+    order := Order{ID: "ord-42", Qty: 5}
+    if err := dletter.Log(dlq, order, errors.New("db timeout"), 1); err != nil {
+        log.Printf("CRITICAL: DLQ write failed: %v", err)
     }
 
-    // 4. Replay in the background (e.g. in a goroutine at startup).
+    // 3. Replay in the background.
     ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
     defer cancel()
 
@@ -121,12 +108,12 @@ Creates a `Logger` that writes to `<filename>` (retry log) and `permanent-<filen
 ### `dletter.Log`
 
 ```go
-func Log[T Loggable](l *Logger, data T, reason error, attempt int) error
+func Log[T any](l *Logger, data T, reason error, attempt int) error
 ```
 
 Writes a failed item to the retry log. Thread-safe.
 
-- `data` — the payload; must implement `Loggable`.
+- `data` — any value with json tags. If it implements `Loggable`, the zero-allocation path is used instead of `json.Marshal`.
 - `reason` — the error that caused the failure.
 - `attempt` — current attempt count (start at 1).
 
@@ -138,7 +125,7 @@ Each line written to disk is a JSON envelope:
 
 ---
 
-### `dletter.Loggable`
+### `dletter.Loggable` (optional)
 
 ```go
 type Loggable interface {
@@ -146,7 +133,7 @@ type Loggable interface {
 }
 ```
 
-Implement this on your payload type. Append the JSON representation of the value to `buf` and return the result. Avoid allocating — reuse `buf` directly.
+Optional interface for zero-allocation serialization. If your payload type implements `Loggable`, `Log` will use `AppendLog` instead of `json.Marshal`. See [Performance: Zero-Allocation Serialization](#performance-zero-allocation-serialization) below.
 
 ---
 
@@ -244,6 +231,28 @@ go func() {
 
 ---
 
+## Performance: Zero-Allocation Serialization
+
+By default, `Log` serializes your payload with `json.Marshal`. For most services this is perfectly fine.
+
+If you're logging at very high throughput and `json.Marshal` allocation pressure shows up in profiles, implement the `Loggable` interface on your type. `Log` detects it at runtime and switches to the zero-allocation path automatically:
+
+```go
+func (o Order) AppendLog(buf []byte) []byte {
+    buf = append(buf, `{"id":"`...)
+    buf = append(buf, o.ID...)
+    buf = append(buf, `","qty":`...)
+    buf = strconv.AppendInt(buf, int64(o.Qty), 10)
+    buf = append(buf, '}')
+    return buf
+}
+
+// Same call — Log detects Loggable and uses AppendLog automatically.
+dletter.Log(dlq, order, err, 1)
+```
+
+---
+
 ## Running Tests
 
 ```bash
@@ -251,6 +260,19 @@ make test     # run all tests
 make bench    # run benchmarks with allocation stats
 make example  # run the example application
 ```
+
+---
+
+## Alternatives
+
+| Approach | Trade-off |
+|---|---|
+| Manual retry loops | No persistence — if the process crashes, in-flight items are lost |
+| Message queues (Kafka, RabbitMQ, SQS) | Reliable, but require external infrastructure and operational overhead |
+| `go-retryablehttp` | HTTP-only; no disk persistence, no dead-letter tracking |
+| **dletter** | Single-binary, zero-infra, disk-backed DLQ with automatic retries and crash-safe resume |
+
+`dletter` is designed for services that need retry + persistence without adding a message broker to the stack.
 
 ---
 

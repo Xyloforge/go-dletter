@@ -217,3 +217,96 @@ func TestClose_BothErrors(t *testing.T) {
 		t.Errorf("expected err2 (%v) in joined error: %v", err2, err)
 	}
 }
+
+// PlainOrder does NOT implement Loggable — exercises the json.Marshal path.
+type PlainOrder struct {
+	ID  string `json:"id"`
+	Qty int    `json:"qty"`
+}
+
+func TestLogWithPlainStruct(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "test_plain.log")
+	l, err := New(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	order := PlainOrder{ID: "ord-99", Qty: 3}
+	if err := Log(l, order, errors.New("timeout"), 1); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(content, &env); err != nil {
+		t.Fatalf("unmarshal: %v (raw: %s)", err, content)
+	}
+
+	if env.Attempt != 1 {
+		t.Errorf("expected attempt 1, got %d", env.Attempt)
+	}
+	if env.Reason != "timeout" {
+		t.Errorf("expected reason 'timeout', got %q", env.Reason)
+	}
+	if string(env.Payload) != `{"id":"ord-99","qty":3}` {
+		t.Errorf("unexpected payload: %q", string(env.Payload))
+	}
+}
+
+func TestLogWithLoggableStruct(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "test_loggable.log")
+	l, err := New(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	payload := ReservationDeadletter{Type: "loggable_test", Qty: 7}
+	if err := Log(l, payload, errors.New("retry"), 2); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(content, &env); err != nil {
+		t.Fatalf("unmarshal: %v (raw: %s)", err, content)
+	}
+
+	// ReservationDeadletter.AppendLog always writes qty:10 regardless of field value,
+	// confirming the Loggable path was used (json.Marshal would write qty:7).
+	if string(env.Payload) != `{"type":"loggable_test","qty":10}` {
+		t.Errorf("expected Loggable path (qty:10), got payload: %q", string(env.Payload))
+	}
+}
+
+// Unserializable contains a channel which json.Marshal cannot handle.
+type Unserializable struct {
+	Ch chan int
+}
+
+func TestLogWithUnserializableStruct(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "test_unserializable.log")
+	l, err := New(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	bad := Unserializable{Ch: make(chan int)}
+	err = Log(l, bad, errors.New("fail"), 1)
+	if err == nil {
+		t.Fatal("expected error for unserializable struct, got nil")
+	}
+	if !errors.Is(err, err) {
+		t.Errorf("expected marshal error, got: %v", err)
+	}
+}

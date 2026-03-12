@@ -7,7 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -95,12 +95,13 @@ func (l *Logger) replayFile(ctx context.Context, path string, handler Handler, o
 		wait := calcWait(opts.InitialWait, attempt)
 
 		timer := time.NewTimer(wait)
-		defer timer.Stop()
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
 		case <-timer.C:
 		}
+		timer.Stop()
 
 		curAttempt := attempt + 1
 		if err := handler(*payloadBuf); err != nil {
@@ -130,7 +131,7 @@ func calcWait(initial time.Duration, attempt int) time.Duration {
 
 	jitterBase := int64(wait / 10)
 	if jitterBase > 0 {
-		wait += time.Duration(rand.Int63n(jitterBase))
+		wait += time.Duration(rand.Int64N(jitterBase))
 	}
 	return wait
 }
