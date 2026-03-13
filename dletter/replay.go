@@ -86,7 +86,7 @@ func (l *Logger) replayFile(ctx context.Context, path string, handler Handler, o
 
 		if opts.MaxAttempts > 0 && attempt >= opts.MaxAttempts {
 			l.parserPool.Put(parser)
-			l.LogPermanent(*payloadBuf, v.Get("reason").String())
+			LogPermanent(l, RawPayload(*payloadBuf), v.Get("reason").String())
 			continue
 		}
 

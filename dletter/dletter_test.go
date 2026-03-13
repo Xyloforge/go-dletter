@@ -176,9 +176,7 @@ func TestLogPermanent_ConcurrentRace(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			payload := ReservationDeadletter{Type: "perm", Qty: id}
-			var buf []byte
-			buf = payload.AppendLog(buf)
-			if err := l.LogPermanent(buf, "max attempts exceeded"); err != nil {
+			if err := LogPermanent(l, payload, "max attempts exceeded"); err != nil {
 				t.Errorf("goroutine %d: %v", id, err)
 			}
 		}(i)

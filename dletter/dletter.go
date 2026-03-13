@@ -154,10 +154,12 @@ func Log[T any](l *Logger, data T, reason error, attempt int) error {
 	return err
 }
 
-// LogPermanent writes a raw JSON payload directly to the permanent-failure log.
-// Use this when you want to route items to permanent failure outside of the
-// automatic retry flow. Safe for concurrent use.
-func (l *Logger) LogPermanent(data []byte, reason string) error {
+// LogPermanent writes a failed item to the permanent-failure log as a single
+// JSON line. data can be any value: if it implements [Loggable], the
+// zero-allocation AppendLog path is used; otherwise it is serialized with
+// [json.Marshal]. reason is the human-readable cause of the permanent failure.
+// Safe for concurrent use.
+func LogPermanent[T any](l *Logger, data T, reason string) error {
 	if l == nil {
 		return errors.New("logger is nil")
 	}
@@ -173,7 +175,17 @@ func (l *Logger) LogPermanent(data []byte, reason string) error {
 	buf = append(buf, '"')
 
 	buf = append(buf, []byte(`,"payload":`)...)
-	buf = append(buf, data...)
+	if loggable, ok := any(data).(Loggable); ok {
+		buf = loggable.AppendLog(buf)
+	} else {
+		b, err := json.Marshal(data)
+		if err != nil {
+			*pBuf = buf[:0]
+			l.pool.Put(pBuf)
+			return fmt.Errorf("dletter: marshal payload: %w", err)
+		}
+		buf = append(buf, b...)
+	}
 	buf = append(buf, []byte("}\n")...)
 
 	l.deadMu.Lock()

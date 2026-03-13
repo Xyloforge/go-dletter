@@ -169,13 +169,16 @@ Return `nil` on success, an error if the item still can't be processed (it will 
 
 ---
 
-### `(*Logger).LogPermanent`
+### `dletter.LogPermanent`
 
 ```go
-func (l *Logger) LogPermanent(data []byte, reason string) error
+func LogPermanent[T any](l *Logger, data T, reason string) error
 ```
 
-Writes a raw JSON payload directly to the permanent-failure log. Useful when you want to route items to permanent failure outside of the automatic retry flow.
+Writes a failed item to the permanent-failure log. Thread-safe.
+
+- `data` — any value with json tags. If it implements `Loggable`, the zero-allocation path is used instead of `json.Marshal`.
+- `reason` — a human-readable cause of the permanent failure.
 
 ---
 
